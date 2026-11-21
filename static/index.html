@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="zh-CN" data-judge="native">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f7f8fb">
+  <title>Gradient Lab · ML Coding</title>
+  <link rel="stylesheet" href="./style.css">
+  <script src="./app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><span class="brand-mark" aria-hidden="true">∇</span><span>Gradient Lab</span></div>
+    <span class="top-divider" aria-hidden="true"></span>
+    <span class="section-name">ML Coding</span>
+    <span class="local-label" id="connection"><span aria-hidden="true"></span>本地运行</span>
+  </header>
+
+  <main class="layout" id="app" data-view="prompt" aria-busy="true">
+    <aside class="library" aria-labelledby="library-title">
+      <div class="library-tools">
+        <div class="library-heading">
+          <h1 id="library-title">练习题库</h1>
+          <span id="problem-count" class="counter"></span>
+        </div>
+        <label class="search">
+          <span aria-hidden="true"></span>
+          <input id="search" type="search" placeholder="搜索题目" aria-label="搜索题目">
+        </label>
+        <div class="filters" id="filters" aria-label="按运行环境筛选">
+          <button type="button" data-filter="全部" aria-pressed="true">全部</button>
+          <button type="button" data-filter="PyTorch" aria-pressed="false">PyTorch</button>
+          <button type="button" data-filter="NumPy" aria-pressed="false">NumPy</button>
+          <button type="button" data-filter="Python" aria-pressed="false">Python</button>
+        </div>
+        <div class="catalog-filters">
+          <select id="topic-filter" aria-label="筛选专题"><option value="">全部专题</option></select>
+          <select id="level-filter" aria-label="筛选难度">
+            <option value="">所有难度</option><option>入门</option><option>进阶</option><option>挑战</option>
+          </select>
+        </div>
+      </div>
+      <nav class="problem-list" id="problem-list" aria-label="练习题目"></nav>
+      <div class="progress-box">
+        <div class="progress-row"><span>练习进度</span><strong id="progress-count">0 / 0</strong></div>
+        <progress id="progress" value="0" max="1" aria-label="已完成题目"></progress>
+      </div>
+    </aside>
+
+    <div class="compact-nav" aria-label="工作区视图">
+      <button type="button" data-view="prompt" aria-pressed="true" aria-controls="problem-panel">看题目</button>
+      <button type="button" data-view="code" aria-pressed="false" aria-controls="workspace">写代码</button>
+    </div>
+
+    <article class="problem-panel" id="problem-panel">
+      <div class="tabs" role="tablist" aria-label="题目详情">
+        <button type="button" role="tab" id="prompt-tab" aria-controls="problem-body" aria-selected="true">题目</button>
+        <button type="button" role="tab" id="solution-tab" aria-controls="problem-body" aria-selected="false">参考解法</button>
+      </div>
+      <div class="problem-body" id="problem-body" role="tabpanel" aria-labelledby="prompt-tab">
+        <p class="quiet">正在加载题库…</p>
+      </div>
+    </article>
+
+    <section class="workspace" id="workspace" aria-labelledby="editor-title">
+      <div class="editor-panel">
+        <div class="editor-header">
+          <h2 id="editor-title"><span class="code-mark" aria-hidden="true">&lt;/&gt;</span><span id="file-name">solution.py</span></h2>
+          <span class="runtime" id="runtime">Python</span>
+          <button type="button" class="text-button" id="reset" disabled>重置</button>
+        </div>
+        <div class="code-area">
+          <div class="number-rail" aria-hidden="true"><pre id="line-numbers">1</pre></div>
+          <div class="code-stack">
+            <pre class="highlight" id="highlight" aria-hidden="true"></pre>
+            <textarea id="editor" aria-label="Python 代码编辑器" autocorrect="off" autocomplete="off" autocapitalize="off" spellcheck="false" wrap="off" disabled></textarea>
+          </div>
+        </div>
+        <div class="editor-footer">
+          <span id="save-status">草稿自动保存</span>
+          <kbd>⌘ ↵</kbd>
+        </div>
+      </div>
+
+      <section class="console" aria-labelledby="tests-title">
+        <div class="console-header">
+          <h2 id="tests-title">测试结果</h2>
+          <div class="actions">
+            <button type="button" class="run" id="run" disabled><span aria-hidden="true">▷</span> 运行</button>
+            <button type="button" class="submit" id="submit" disabled>提交</button>
+          </div>
+        </div>
+        <div id="results" class="results" aria-live="polite"><p class="quiet">选择一道题后即可开始。</p></div>
+      </section>
+    </section>
+  </main>
+</body>
+</html>

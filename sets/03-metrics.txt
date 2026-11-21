@@ -1,0 +1,203 @@
+@@ bce-logits | Binary Cross-Entropy with Logits | 进阶 | 损失与评估 | N
+bce_logits(logits, targets)
+计算二分类 logits 的平均 BCE，避免大正负值溢出。
+logits 和 targets 同形状且非空。target 可为 [0,1] 内的软标签。返回标量。
+? 可用 max(z,0) - yz + log1p(exp(-abs(z)))。
+---
+    loss = np.maximum(logits, 0.) - logits * targets + np.log1p(np.exp(-np.abs(logits)))
+    return float(loss.mean())
+---
+大幅预测错误 | (a([1000.,-1000.]), a([0.,1.])) => 1000.
+零 logits | (a([[0.,0.]]), a([[.2,.9]])) => np.log(2.)
+软标签 | (a([2.]), a([.75])) => np.log1p(np.exp(-2.))+.5
+
+@@ smooth-cross-entropy | Cross-Entropy with Label Smoothing | 进阶 | 损失与评估 | N
+smoothed_ce(logits, labels, epsilon)
+对多分类交叉熵加入均匀 label smoothing。
+logits 为 [N,C]，labels 为 [N]。软目标是 (1-epsilon)·one_hot + epsilon/C，每行求和后取均值。
+? 问题可以写成 logsumexp 减去目标分布下 logit 的期望。
+---
+    centered = logits - logits.max(axis=1, keepdims=True)
+    log_den = np.log(np.exp(centered).sum(axis=1))
+    target_score = (1-epsilon)*centered[np.arange(len(labels)), labels] + epsilon*centered.mean(axis=1)
+    return float((log_den - target_score).mean())
+---
+均匀预测 | (np.zeros((2,3)), a([0,2]), .4) => np.log(3.)
+极端 logits | (a([[1000.,-1000.]]), a([0]), .2) => 200.
+没有平滑 | (a([[3.,0.],[0.,4.]]), a([0,1]), 0.) => (np.log1p(np.exp(-3.))+np.log1p(np.exp(-4.)))/2
+
+@@ focal-loss | Binary Focal Loss | 进阶 | 损失与评估 | N
+focal_loss(logits, labels, alpha, gamma)
+对二分类 logits 计算平均 focal loss。
+p_t 是正确类别的概率。正例权重 alpha、负例权重 1-alpha，损失为 -alpha_t·(1-p_t)^gamma·log(p_t)。
+? 用带符号的 logit 和 logaddexp 求 log(p_t)，再用 expm1 精确计算 1-p_t。
+---
+    signed = np.where(labels == 1, logits, -logits)
+    log_pt = -np.logaddexp(0., -signed)
+    weight = np.where(labels == 1, alpha, 1-alpha)
+    return float((-weight * (-np.expm1(log_pt)) ** gamma * log_pt).mean())
+---
+对称概率 | (a([0.,0.]), a([1,0]), .25, 2.) => np.log(2.)/8
+gamma 为零 | (a([2.]), a([1]), .5, 0.) => .5*np.log1p(np.exp(-2.))
+预测完全反向 | (a([-1000.,1000.]), a([1,0]), .4, 2.) => 500.
+
+@@ dice-loss | Batched Soft Dice Loss | 入门 | 损失与评估 | N
+dice_loss(pred, target, smooth=1.)
+计算二值分割的 soft Dice loss。
+输入形状 [B,...]，每个样本独立展平。分数为 (2·sum(pred·target)+smooth)/(sum(pred)+sum(target)+smooth)。返回 1 减去平均分数。
+? 沿 batch 之外的轴归约，然后再沿 batch 求平均。
+---
+    axes = tuple(range(1, pred.ndim))
+    intersection = (pred * target).sum(axis=axes)
+    mass = pred.sum(axis=axes) + target.sum(axis=axes)
+    return float(1 - ((2*intersection + smooth) / (mass + smooth)).mean())
+---
+完美预测 | (a([[1.,0.],[0.,0.]]), a([[1.,0.],[0.,0.]])) => 0.
+两个样本分别评分 | (a([[[0.,1.]],[[0.,0.]]]), a([[[1.,0.]],[[0.,0.]]])) => 1/3
+软预测 | (a([[.5,.25]]), a([[1.,0.]]), .5) => 1-1.5/2.25
+
+@@ triplet-margin | Triplet Loss with Squared Distances | 入门 | 损失与评估 | N
+triplet_loss(anchor, positive, negative, margin)
+计算三元组损失，推动正样本比负样本更靠近 anchor。
+三组数组都是 [B,D]。距离取平方欧氏距离，逐组应用 max(0,d_ap-d_an+margin)，再求均值。
+? 先区分每个样本的距离和 batch 维度的归约。
+---
+    close = ((anchor - positive) ** 2).sum(axis=1)
+    far = ((anchor - negative) ** 2).sum(axis=1)
+    return float(np.maximum(close - far + margin, 0.).mean())
+---
+含达标样本 | (a([[0.],[0.]]), a([[1.],[2.]]), a([[2.],[1.]]), 1.) => 2.
+零 margin | (a([[0.,0.]]), a([[1.,1.]]), a([[1.,0.]]), 0.) => 1.
+完全相同 | (np.zeros((3,2)), np.zeros((3,2)), np.zeros((3,2)), .8) => .8
+
+@@ huber-loss | Huber Loss | 入门 | 损失与评估 | N
+huber(pred, labels, delta)
+计算 Huber 回归损失，并对所有元素求平均。
+误差绝对值不超过 delta 时用 0.5·e²，否则用 delta·(|e|-0.5·delta)。delta 大于 0。
+? 把绝对误差拆成至多 delta 的二次段和超出它的线性段。
+---
+    error = np.abs(pred-labels)
+    quadratic = np.minimum(error, delta)
+    return float((.5*quadratic**2 + delta*(error-quadratic)).mean())
+---
+跨越边界 | (a([0.,1.,3.]), a([0.,0.,0.]), 1.) => 1.
+正负误差对称 | (a([-2.,2.]), a([0.,0.]), .5) => .875
+二维输入 | (a([[4.,7.]]), a([[4.,5.]]), 2.) => 1.
+
+@@ confusion-matrix | Multiclass Confusion Matrix | 入门 | 损失与评估 | N
+confusion(labels, predictions, classes)
+统计多分类预测的混淆矩阵。
+整数标签在 [0,classes)。实际类别是行，预测类别是列。返回 [classes,classes] 的整数矩阵。
+? 用类数乘实际类别，再加预测类别，将二元坐标编码成一维索引。
+---
+    flat = labels * classes + predictions
+    return np.bincount(flat, minlength=classes**2).reshape(classes, classes)
+---
+方向与重复 | (a([0,0,1,2,2]), a([0,1,1,0,0]), 3) => a([[1,1,0],[0,1,0],[2,0,0]])
+全空 | (a([],dtype=int), a([],dtype=int), 2) => np.zeros((2,2),dtype=int)
+缺失类别 | (a([3]), a([1]), 4) => a([[0,0,0,0],[0,0,0,0],[0,0,0,0],[0,1,0,0]])
+
+@@ macro-f1 | Macro F1 from a Confusion Matrix | 入门 | 损失与评估 | N
+macro_f1(matrix)
+根据混淆矩阵计算各类别 F1 后取等权平均。
+行是真实类别，列是预测类别。某类别既未出现也未被预测时，其 F1 定义为 0，并计入平均。
+? 每类的分母是该类对应的行和加列和，分子为对角线的两倍。
+---
+    denominator = matrix.sum(axis=0) + matrix.sum(axis=1)
+    numerator = 2. * np.diag(matrix)
+    scores = np.divide(numerator, denominator, out=np.zeros_like(numerator), where=denominator > 0)
+    return float(scores.mean())
+---
+包含缺失类别 | (np.diag([2,4,0]),) => 2/3
+完全相反 | (a([[0,2],[3,0]]),) => 0.
+不对称混淆 | (a([[2,1],[0,1]]),) => (.8+2/3)/2
+
+@@ roc-auc | ROC AUC with Ties | 挑战 | 损失与评估 | N
+roc_auc(scores, labels)
+计算二分类 ROC AUC，正确处理正负样本同分。
+labels 为 0/1 且两类都存在。AUC 等于随机正例分数大于随机负例的概率，同分计 0.5。目标 O(N log N)。
+? 稳定排序后逐个分数组处理，同一分数组内的负例只给半个积分。
+---
+    order = np.argsort(scores, kind="stable")
+    ranked_scores = scores[order]
+    ranked_labels = labels[order]
+    edges = np.r_[0, np.flatnonzero(ranked_scores[1:] != ranked_scores[:-1]) + 1, len(scores)]
+    wins = 0.
+    seen_negative = 0
+    for begin, end in zip(edges[:-1], edges[1:]):
+        positive = int(ranked_labels[begin:end].sum())
+        negative = end - begin - positive
+        wins += positive * (seen_negative + .5 * negative)
+        seen_negative += negative
+    return float(wins / (int(labels.sum()) * seen_negative))
+---
+混合同分 | (a([.1,.7,.7,.9]), a([0,0,1,1])) => .875
+全部同分 | (a([4.,4.,4.]), a([0,1,1])) => .5
+正例分数更低 | (a([0.,1.,2.]), a([1,0,0])) => 0.
+
+@@ average-precision | Average Precision at Score Thresholds | 挑战 | 损失与评估 | N
+average_precision(scores, labels)
+计算不插值的二分类 average precision。
+每个不同分数作为阈值，同分必须整组纳入。AP 是 sum(precision·Δrecall)。无正例时返回 0。
+? 降序排序并累计 TP，从每个同分组的最后一项读取 precision 和 recall。
+---
+    total = labels.sum()
+    if total == 0:
+        return 0.
+    order = np.argsort(-scores, kind="stable")
+    ranked_scores = scores[order]
+    stops = np.r_[np.flatnonzero(ranked_scores[1:] != ranked_scores[:-1]), len(scores)-1]
+    tp = np.cumsum(labels[order])[stops]
+    precision = tp / (stops+1)
+    return float(np.dot(precision, np.diff(np.r_[0, tp])) / total)
+---
+分组同分 | (a([.9,.6,.6,.1]), a([1,0,1,0])) => 5/6
+全部同分 | (a([7.,7.,7.]), a([0,1,0])) => 1/3
+无正例 | (a([.1,.2]), a([0,0])) => 0.
+
+@@ expected-calibration-error | Expected Calibration Error | 进阶 | 损失与评估 | N
+ece(confidence, correct, bins)
+按等宽 confidence 分桶，计算 top-label ECE。
+confidence 在 [0,1]，correct 为相同长度的 0/1 数组。左闭右开，1 分入最后一桶。空输入返回 0。
+? 各桶用样本数加权。可直接累加每桶 confidence 总和与 correct 总和之差。
+---
+    if not len(confidence):
+        return 0.
+    index = np.minimum((confidence * bins).astype(int), bins - 1)
+    confident_sum = np.bincount(index, weights=confidence, minlength=bins)
+    correct_sum = np.bincount(index, weights=correct, minlength=bins)
+    return float(np.abs(confident_sum - correct_sum).sum() / len(confidence))
+---
+边界 1.0 | (a([0.,.25,.5,1.]), a([0,0,1,1]), 2) => .1875
+一个桶可抵消 | (a([.2,.8]), a([0,1]), 1) => 0.
+空输入 | (a([]), a([]), 3) => 0.
+
+@@ perplexity | Token-Level Perplexity | 入门 | 损失与评估 | N
+perplexity(log_probs, valid)
+从真实 token 的自然对数概率计算 perplexity。
+有效位置由同形状布尔数组 valid 标出。整个 batch 按有效 token 数平均。没有有效位置时返回 1。
+? 指数作用在全部有效 token 的平均负 log-prob 上。
+---
+    selected = log_probs[valid]
+    return float(np.exp(-selected.mean())) if selected.size else 1.
+---
+忽略 pad | (a([[-np.log(2.),-np.inf],[-np.log(8.),-np.log(2.)]]), a([[True,False],[True,True]])) => 32**(1/3)
+全空 | (a([np.nan]), a([False])) => 1.
+完全正确 | (a([0.,0.]), a([True,True])) => 1.
+
+@@ ndcg-at-k | NDCG at K | 进阶 | 损失与评估 | N
+ndcg_at_k(relevance, k)
+给定搜索结果排序后的分级 relevance，计算 NDCG@k。
+gain 是 2^rel - 1，排名 i 从 1 起算，折扣 log2(i+1)。理想 DCG 为同一批条目按 relevance 重新排序。IDCG 为 0 时返回 0。
+? 两次用同一组 discount。一次针对已有排序，一次针对按 relevance 排好的理想结果。
+---
+    count = min(k, len(relevance))
+    discount = np.log2(np.arange(count) + 2.)
+    gains = np.exp2(relevance) - 1
+    observed = np.sum(gains[:count] / discount)
+    ideal = np.sum(np.sort(gains)[::-1][:count] / discount)
+    return float(observed / ideal) if ideal > 0 else 0.
+---
+排序颠倒 | (a([0,2]), 2) => 1/np.log2(3.)
+理想排序 | (a([3,2,0]), 2) => 1.
+零相关性 | (a([0,0]), 5) => 0.

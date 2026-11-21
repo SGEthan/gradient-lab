@@ -1,0 +1,107 @@
+@@ cross-entropy | Stable Cross-Entropy | 进阶 | 损失与评估 | N
+cross_entropy(logits, targets)
+从未归一化 logits 计算平均多类交叉熵，保持大分数下的数值稳定性。
+logits 为 [B,C]，targets 为 [B] 的类别索引。返回标量。网页版验证前向计算。
+? 每行先减最大值，再用 log(sum(exp(shifted))) 减该行的正确类别 shifted logit。
+---
+    centered = logits - logits.max(axis=1, keepdims=True)
+    normalizer = np.log(np.exp(centered).sum(axis=1))
+    return float((normalizer - centered[np.arange(len(targets)), targets]).mean())
+---
+单个样本 | (a([[2.,1.,0.]]),a([0])) => np.log(1+np.exp(-1)+np.exp(-2))
+千级错误预测 | (a([[-1000.,1000.],[900.,-900.]]),a([0,1])) => 1900.
+不同标签 | (a([[0.,0.],[np.log(3.),0.]]),a([0,1])) => (np.log(2.)+np.log(4.))/2
+一个类别 | (a([[100.],[-10.]]),a([0,0])) => 0.
+
+@@ masked-attention | Masked Multi-Head Attention | 进阶 | Transformer 与解码 | N
+masked_attention(q, k, v, mask=None)
+实现带布尔 mask 的 scaled dot-product attention。query 和 key 可以有不同长度。
+q 为 [B,H,Tq,D]，k 为 [B,H,Tk,D]，v 为 [B,H,Tk,Dv]。mask 可广播到 [B,H,Tq,Tk]，True 表示可见。
+沿 key 轴归一化。一个 query 全被遮挡时输出为零。返回 [B,H,Tq,Dv]。
+? 为全遮挡行准备有限的归一化中间值，再把这些权重置零。
+---
+    score = q @ k.swapaxes(-1,-2) / np.sqrt(q.shape[-1])
+    if mask is None:
+        mask = True
+    score = np.where(mask, score, -np.inf)
+    visible = np.any(np.broadcast_to(mask, score.shape), axis=-1, keepdims=True)
+    safe_score = np.where(visible, score, 0.)
+    weight = np.exp(safe_score - safe_score.max(axis=-1, keepdims=True))
+    return np.where(visible, weight / weight.sum(axis=-1, keepdims=True), 0.) @ v
+---
+因果 mask | (np.zeros((1,1,2,1)),np.zeros((1,1,2,1)),a([[[[2.],[6.]]]]),a([[True,False],[True,True]])) => a([[[[2.],[4.]]]])
+Cross-attention | (np.zeros((1,2,1,3)),np.zeros((1,2,3,3)),np.arange(12.).reshape(1,2,3,2)) => a([[[[2.,3.]],[[8.,9.]]]])
+一行全遮挡 | (np.zeros((1,2,2,3)),np.zeros((1,2,3,3)),np.arange(12.).reshape(1,2,3,2),a([[False,False,False],[True,False,True]])) => a([[[[0.,0.],[2.,3.]],[[0.,0.],[8.,9.]]]])
+跨 batch 广播 | (np.ones((2,3,2,7)),np.ones((2,3,4,7)),np.arange(120.).reshape(2,3,4,5),np.arange(16).reshape(2,1,2,4)%3==1)
+
+@@ kv-cache | KV-Cache Decode Step | 进阶 | Transformer 与解码 | N
+decode_step(q, k_new, v_new, k_cache, v_cache)
+实现增量解码的一步：追加当前 token 的 K/V，再查询全部可见位置。
+新增数组为 [B,H,1,D]，缓存为 [B,H,T,D]，T 可为 0。返回 (out,keys,values)，新缓存长度为 T+1，输入缓存可复用。
+? 按倒数第二个轴拼接。对当前 query 的 score 行做稳定 softmax。
+---
+    keys = np.concatenate((k_cache,k_new),axis=-2)
+    values = np.concatenate((v_cache,v_new),axis=-2)
+    scores = q @ keys.swapaxes(-1,-2) / np.sqrt(q.shape[-1])
+    weights = np.exp(scores - scores.max(axis=-1,keepdims=True))
+    return (weights / weights.sum(axis=-1,keepdims=True)) @ values, keys, values
+---
+有历史 | (np.zeros((1,1,1,1)),np.zeros((1,1,1,1)),a([[[[6.]]]]),np.zeros((1,1,1,1)),a([[[[2.]]]])) => (a([[[[4.]]]]),np.zeros((1,1,2,1)),a([[[[2.],[6.]]]]))
+空缓存 | (np.zeros((1,2,1,2)),np.ones((1,2,1,2)),np.full((1,2,1,2),5.),np.empty((1,2,0,2)),np.empty((1,2,0,2))) => (np.full((1,2,1,2),5.),np.ones((1,2,1,2)),np.full((1,2,1,2),5.))
+强偏好当前 token | (np.full((2,2,1,3),1000.),np.full((2,2,1,3),1000.),np.full((2,2,1,3),5.),np.zeros((2,2,3,3)),np.zeros((2,2,3,3)))
+
+@@ clip-loss | Symmetric CLIP Loss | 进阶 | 损失与评估 | N
+clip_loss(images, texts, temperature)
+给定成对图文向量，用 batch 内其他样本做负例并计算双向对比损失。
+两组输入均为 [B,D]。逐行 L2 归一化，范数最低取 1e-12。相似度除以正数 temperature。返回两个方向交叉熵的平均值。
+? 使用同一个相似度矩阵的行和列，正例始终位于对角线。
+---
+    u = images / np.maximum(np.linalg.norm(images,axis=1,keepdims=True),1e-12)
+    v = texts / np.maximum(np.linalg.norm(texts,axis=1,keepdims=True),1e-12)
+    scores = (u @ v.T) / temperature
+    forward = np.logaddexp.reduce(scores,axis=1) - scores.diagonal()
+    reverse = np.logaddexp.reduce(scores,axis=0) - scores.diagonal()
+    return float((forward+reverse).mean()/2)
+---
+完美匹配 | (np.eye(2),np.eye(2),1.) => np.log1p(np.exp(-1.))
+单对样本 | (a([[1.,3.]]),a([[-1.,-3.]]),.01) => 0.
+零向量与温度 | (a([[0.,0.],[1.,3.]]),np.eye(2),.8)
+两方向不同 | (a([[1.,0.],[0.,1.],[1.,1.]]),a([[1.,2.],[-1.,0.],[1.,0.]]),.3)
+
+@@ slot-update | Gated Slot Update | 入门 | 数据与流式系统 | N
+update_memory(memory, candidate, rate, valid)
+把每帧候选写入固定容量 slots。各 slot 有自己的写入率和是否有效的标记。
+memory、candidate 为 [B,S,D]，rate、valid 为 [B,S]。有效项更新为 (1-rate)·memory+rate·candidate，其余保持旧值。输入可复用。
+? 使 rate 和 valid 沿 feature 维广播。用选择操作屏蔽无效输入。
+---
+    weight = rate[...,None]
+    return np.where(valid[...,None], (1-weight)*memory + weight*candidate, memory)
+---
+部分写入 | (a([[[2.,4.],[1.,8.]]]),a([[[6.,0.],[3.,4.]]]),a([[.25,1.]]),a([[True,False]])) => a([[[3.,3.],[1.,8.]]])
+全写与零写 | (a([[[1.],[2.]]]),a([[[3.],[4.]]]),a([[0.,1.]]),a([[True,True]])) => a([[[1.],[4.]]])
+无效 NaN | (a([[[2.]]]),a([[[np.nan]]]),a([[1.]]),a([[False]])) => a([[[2.]]])
+多 batch 与不同门控 | (np.zeros((2,4,5)),np.arange(40.).reshape(2,4,5),np.linspace(0,1,8).reshape(2,4),np.arange(8).reshape(2,4)%2==0)
+
+@@ gate-calibration | Calibrate a Write Gate | 挑战 | 数据与流式系统 | N
+calibrate_gate(logits, target)
+用共享标量 bias 把一组 sigmoid 写入率的均值调到指定目标。
+logits 为非空一维 float64，取值在 [-1000,1000]。target 在 [1e-5,1-1e-5]。返回 Python float b，使 mean(sigmoid(logits+b)) 与目标相差不超过 1e-7。
+? 用 target 的 logit 减掉输入最大/最小值，得到二分区间。
+---
+    center = np.log(target) - np.log1p(-target)
+    lo = center - logits.max()
+    hi = center - logits.min()
+    for _ in range(48):
+        mid = (lo+hi)/2
+        mean = np.exp(-np.logaddexp(0.,-(logits+mid))).mean()
+        if mean < target:
+            lo = mid
+        else:
+            hi = mid
+    return float((lo+hi)/2)
+---
+均匀写入率 | (np.zeros(3),.25) => -1.0986122886681098
+混合 logits | (a([-2.,.5,4.]),.7)
+幅度较大 | (a([995.,999.,1000.]),.45)
+目标接近零 | (a([-700.,2.,500.]),.00001)
+目标接近一 | (a([-1000.,-998.,-9.,1000.]),.99999)

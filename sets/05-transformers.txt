@@ -1,0 +1,215 @@
+@@ causal-offset-mask | Causal Mask with Position Offsets | 入门 | Transformer 与解码 | N
+causal_mask(query_pos, key_pos)
+根据绝对位置生成增量解码用的 causal mask。
+query_pos、key_pos 是一维整数数组，返回 [Q,K] 的布尔数组，key 位置不超过 query 时可见。
+? 使用绝对位置广播比较，缓存前缀中的 key 通常比当前 query 块更早。
+---
+    return key_pos[None, :] <= query_pos[:, None]
+---
+缓存偏移 | (a([3,4]),a([0,1,3,4])) => a([[True,True,True,False],[True,True,True,True]])
+没有 query | (a([],dtype=int),a([0,1])) => np.empty((0,2),dtype=bool)
+不连续位置 | (a([2,8]),a([1,3,9])) => a([[True,False,False],[True,True,False]])
+
+@@ combined-attention-mask | Combine Padding and Causal Masks | 入门 | Transformer 与解码 | N
+attention_mask(valid, causal)
+把每个样本的有效 token mask 扩展为可广播到注意力分数的 mask。
+valid 为 [B,T] 布尔量。返回 [B,1,T,T]。query 或 key 无效均遮挡，causal=True 时再屏蔽未来。
+? 分别把 valid 扩展为 query 轴与 key 轴。
+---
+    allowed = valid[:, None, :, None] & valid[:, None, None, :]
+    if causal:
+        allowed &= np.tri(valid.shape[1], dtype=bool)
+    return allowed
+---
+右侧填充 | (a([[True,True,False]]),True) => a([[[[True,False,False],[True,True,False],[False,False,False]]]])
+双向注意力 | (a([[True,False,True]]),False) => a([[[[True,False,True],[False,False,False],[True,False,True]]]])
+空序列 | (np.zeros((2,0),dtype=bool),True) => np.zeros((2,1,0,0),dtype=bool)
+
+@@ grouped-query-attention | Grouped-Query Attention | 挑战 | Transformer 与解码 | N
+grouped_attention(q, k, v)
+实现多个 query heads 共享一组 K/V heads 的注意力。
+q 为 [B,Hq,Q,D]，k 为 [B,Hkv,K,D]，v 为 [B,Hkv,K,Dv]。Hq 是 Hkv 的倍数。每个连续的 Hq/Hkv query heads 对应一个 K/V head。
+返回 [B,Hq,Q,Dv]。避免将 k、v 物理复制为 Hq 个 head。
+? 将 query head 轴拆成 [Hkv,group]，为 K/V 插入可广播的 group 轴。
+---
+    b, heads, q_len, d = q.shape
+    kv_heads = k.shape[1]
+    q_grouped = q.reshape(b, kv_heads, heads//kv_heads, q_len, d)
+    score = q_grouped @ k[:, :, None].swapaxes(-1, -2) / np.sqrt(d)
+    weights = np.exp(score - score.max(axis=-1, keepdims=True))
+    mixed = (weights / weights.sum(axis=-1, keepdims=True)) @ v[:, :, None]
+    return mixed.reshape(b, heads, q_len, v.shape[-1])
+---
+两个 KV 组 | (np.zeros((1,4,1,1)),np.zeros((1,2,2,1)),a([[[[2.],[4.]],[[8.],[12.]]]])) => a([[[[3.]],[[3.]],[[10.]],[[10.]]]])
+同头数 | (a([[[[1.]]]]),a([[[[1.],[0.]]]]),a([[[[1.,0.],[0.,1.]]]])) => a([[[[np.e/(1+np.e),1/(1+np.e)]]]])
+跨 batch 及形状 | (np.arange(48.).reshape(2,4,3,2)/8,np.arange(16.).reshape(2,2,2,2)/7,np.arange(24.).reshape(2,2,2,3))
+
+@@ local-attention | Causal Sliding-Window Attention | 进阶 | Transformer 与解码 | N
+local_attention(q, k, v, window)
+为每个 token 计算仅覆盖最近 window 个位置的 causal attention。
+q、k 为 [T,D]，v 为 [T,Dv]。window≥1，包含当前位置。要求每个 query 只计算窗口中的分数。
+? 对第 i 个 query 只切出 max(0,i-window+1) 到 i 的 K/V。
+---
+    result = np.empty((len(q), v.shape[1]), dtype=float)
+    scale = np.sqrt(q.shape[-1])
+    for i, row in enumerate(q):
+        start = max(0, i - window + 1)
+        scores = k[start:i+1] @ row / scale
+        weights = np.exp(scores - scores.max())
+        result[i] = (weights / weights.sum()) @ v[start:i+1]
+    return result
+---
+窗口大小二 | (np.zeros((4,1)),np.zeros((4,1)),a([[1.],[3.],[5.],[7.]]),2) => a([[1.],[2.],[4.],[6.]])
+只读当前 | (np.ones((2,3)),np.ones((2,3)),a([[1.,2.],[3.,4.]]),1) => a([[1.,2.],[3.,4.]])
+窗口大于序列 | (np.zeros((2,1)),np.zeros((2,1)),a([[0.],[8.]]),5) => a([[0.],[4.]])
+
+@@ chunked-softmax | Online Softmax Across Chunks | 挑战 | Transformer 与解码 | N
+streaming_weighted_sum(chunks)
+逐块读取 logits 与向量，计算全序列 softmax 加权和。
+chunks 是只能遍历一次的迭代器，每项为 (logits [T], vectors [T,D])。每块非空。保留 O(D) 的跨块状态，不缓存历史块。
+? 保留历史最大分数、归一化分母及加权和。最大值改变时按 exp(old-new) 重标定历史状态。
+---
+    maximum = -np.inf
+    normalizer = 0.
+    total = 0.
+    for logits, vectors in chunks:
+        updated = max(maximum, float(logits.max()))
+        rescale = np.exp(maximum-updated)
+        weights = np.exp(logits-updated)
+        total = total*rescale + weights @ vectors
+        normalizer = normalizer*rescale + weights.sum()
+        maximum = updated
+    return total / normalizer
+---
+跨块最大值改变 | (iter([(a([0.]),a([[100.]])),(a([1000.,1000.]),a([[2.],[6.]]))]),) => a([4.])
+均匀分布两维 | (iter([(a([-7.,-7.]),a([[1.,0.],[3.,2.]])),(a([-7.]),a([[8.,4.]]))]),) => a([4.,2.])
+不等概率 | (iter([(a([0.]),a([[10.]])),(a([np.log(3.)]),a([[2.]]))]),) => a([4.])
+
+@@ rotary-embeddings | Rotary Position Embedding | 进阶 | Transformer 与解码 | N
+apply_rope(x, cos, sin)
+对偶数和奇数特征对应用逐位置旋转。
+x 为 [...,T,D]，D 为偶数。cos、sin 为 [T,D/2]。每对 (u,v) 变为 (u·cos-v·sin, u·sin+v·cos)，保留交错顺序。
+? 分别读取 x[...,0::2] 和 x[...,1::2] 后再写回。
+---
+    even = x[..., 0::2]
+    odd = x[..., 1::2]
+    output = np.empty_like(x)
+    output[..., 0::2] = even*cos - odd*sin
+    output[..., 1::2] = even*sin + odd*cos
+    return output
+---
+九十度旋转 | (a([[2.,3.,4.,5.]]),a([[0.,1.]]),a([[1.,0.]])) => a([[-3.,2.,4.,5.]])
+使用位置广播 | (a([[[1.,2.],[3.,4.]],[[5.,6.],[7.,8.]]]),a([[1.],[0.]]),a([[0.],[1.]])) => a([[[1.,2.],[-4.,3.]],[[5.,6.],[-8.,7.]]])
+共用多个 head | (np.arange(32.).reshape(1,2,4,4),np.cos(np.arange(8.).reshape(4,2)),np.sin(np.arange(8.).reshape(4,2)))
+
+@@ sinusoidal-position | Sinusoidal Position Encodings | 入门 | Transformer 与解码 | N
+sinusoidal(positions, dim, base=10000.)
+计算绝对位置的交错正弦与余弦编码。
+positions 为 [T]，dim 为正偶数。第 2i/2i+1 列分别用 sin/cos(pos / base^(2i/dim))，返回 [T,dim]。
+? 频率只对 dim/2 个索引计算，再展开到成对的列。
+---
+    angles = positions[:, None] / base**(np.arange(0, dim, 2) / dim)
+    result = np.empty((len(positions), dim), dtype=float)
+    result[:, 0::2] = np.sin(angles)
+    result[:, 1::2] = np.cos(angles)
+    return result
+---
+零位置与非零位置 | (a([0,1]),2) => a([[0.,1.],[np.sin(1.),np.cos(1.)]])
+自定义基数 | (a([2]),4,4.) => a([[np.sin(2.),np.cos(2.),np.sin(1.),np.cos(1.)]])
+空位置 | (a([],dtype=int),6) => np.empty((0,6))
+
+@@ alibi | ALiBi Attention Bias | 进阶 | Transformer 与解码 | N
+alibi(query_pos, key_pos, slopes)
+为各 head 构造带因果限制的 ALiBi 加性偏置。
+返回 [H,Q,K]。历史位置偏置为 -slope·(query_pos-key_pos)，未来位置偏置为负无穷。
+? 把距离表广播到 head 轴，然后遮挡负距离。
+---
+    distance = query_pos[:, None] - key_pos[None, :]
+    weights = -slopes[:, None, None] * distance
+    return np.where(distance >= 0, weights, -np.inf)
+---
+两个 head | (a([1]),a([0,1,2]),a([.5,2.])) => a([[[-.5,0.,-np.inf]],[[-2.,0.,-np.inf]]])
+位置偏移一致 | (a([10,11]),a([8,10]),a([1.])) => a([[[-2.,0.],[-3.,-1.]]])
+空 key 轴 | (a([2,4]),a([],dtype=int),a([.5,1.])) => np.empty((2,2,0))
+
+@@ mha-projections | Split and Merge Attention Heads | 进阶 | Transformer 与解码 | N
+project_and_merge(x, w_in, w_out, heads)
+实现一个精简的多头 self-attention 层，包括 QKV 投影、head 拆合与输出投影。
+x 为 [B,T,D]，w_in 为 [D,3D]，三段列依次是 Q、K、V。w_out 为 [D,D]。D 可以整除 heads。不加 mask 或 bias。
+? 先把 Q、K、V 变为 [B,H,T,D/H]，合回时交换相同的轴。
+---
+    b, t, d = x.shape
+    width = d // heads
+    q, k, v = (part.reshape(b, t, heads, width).transpose(0,2,1,3)
+               for part in np.split(x @ w_in, 3, axis=-1))
+    score = q @ k.swapaxes(-1,-2) / np.sqrt(width)
+    weight = np.exp(score - score.max(axis=-1,keepdims=True))
+    out = (weight / weight.sum(axis=-1,keepdims=True)) @ v
+    return out.transpose(0,2,1,3).reshape(b,t,d) @ w_out
+---
+长度一时仅保留 V | (a([[[1.,2.]]]),np.tile(np.eye(2),(1,3)),a([[0.,1.],[1.,0.]]),2) => a([[[2.,1.]]])
+零 QK 得到均值 | (a([[[2.,4.],[6.,8.]]]),a([[0.,0.,0.,0.,1.,0.],[0.,0.,0.,0.,0.,1.]]),np.eye(2),2) => a([[[4.,6.],[4.,6.]]])
+独立 batch | (np.arange(24.).reshape(2,3,4)/23,np.tile(np.eye(4),(1,3)),np.eye(4),2)
+
+@@ top-k-logits | Deterministic Top-K Logit Filter | 入门 | Transformer 与解码 | N
+topk_logits(logits, k)
+对每行只保留最大的 k 个 logits，将其余置为负无穷。
+logits 为 [B,V]，1≤k≤V。同分时优先 token ID 小者。返回相同形状。
+? 稳定排序索引，再用 take_along_axis 与 put_along_axis 填入对应位置。
+---
+    best = np.argsort(-logits, axis=-1, kind="stable")[:, :k]
+    result = np.full_like(logits, -np.inf)
+    np.put_along_axis(result, best, np.take_along_axis(logits, best, axis=-1), axis=-1)
+    return result
+---
+包含同分 | (a([[4.,6.,6.,7.]]),2) => a([[-np.inf,6.,-np.inf,7.]])
+每行独立 | (a([[3.,0.],[0.,3.]]),1) => a([[3.,-np.inf],[-np.inf,3.]])
+保留全部 | (a([[-1000.,0.,1000.]]),3) => a([[-1000.,0.,1000.]])
+
+@@ nucleus-mask | Nucleus Sampling Mask | 进阶 | Transformer 与解码 | N
+nucleus_mask(logits, p)
+保留累计概率首次达到或超过 p 的最短高分前缀。
+logits 为非空一维有限数组。p 在 (0,1]。同分优先 token ID 小者，返回原索引顺序的布尔 mask。p=1 保留所有 token。
+? 排序后稳定 softmax 并累计概率，记得保留跨过 p 的那个 token。
+---
+    if p == 1:
+        return np.ones(logits.shape, dtype=bool)
+    order = np.argsort(-logits, kind="stable")
+    weights = np.exp(logits[order] - logits[order[0]])
+    mass = np.cumsum(weights / weights.sum())
+    count = np.searchsorted(mass, p, side="left") + 1
+    out = np.zeros(logits.shape, dtype=bool)
+    out[order[:count]] = True
+    return out
+---
+保留跨阈值项 | (np.log(a([.1,.3,.6])),.65) => a([False,True,True])
+相同分数 | (a([0.,0.,0.,0.]),.5) => a([True,True,False,False])
+全部保留 | (a([1000.,-1000.]),1.) => a([True,True])
+
+@@ beam-step | One Beam Search Expansion | 进阶 | Transformer 与解码 | N
+beam_step(prefix_scores, token_log_probs, width)
+把当前各 beam 与候选 token 的 log-prob 相加，从全部组合中选前 width 个。
+prefix_scores 为 [B]，token_log_probs 为 [B,V]。返回 (父 beam 索引, token 索引, 累积分数) 三个一维数组，按分数降序。同分取较小的父索引，再取较小的 token 索引。
+? 把二维候选展平并稳定排序，用整除与取模还原坐标。
+---
+    score = prefix_scores[:, None] + token_log_probs
+    flat = score.ravel()
+    best = np.argsort(-flat, kind="stable")[:width]
+    return best // score.shape[1], best % score.shape[1], flat[best]
+---
+全局选出两个 | (a([0.,-2.]),a([[-6.,-2.],[-.1,-.2]]),2) => (a([0,1]),a([1,0]),a([-2.,-2.1]))
+同分取低索引 | (np.zeros(2),np.zeros((2,2)),3) => (a([0,0,1]),a([0,1,0]),np.zeros(3))
+宽度超出 | (a([-1.]),a([[-2.,-1.]]),5) => (a([0,0]),a([1,0]),a([-2.,-3.]))
+
+@@ sft-label-mask | Assistant-Only SFT Labels | 入门 | Transformer 与解码 | N
+sft_labels(tokens, assistant, valid, ignore=-100)
+生成供 causal LM 训练的右移标签，仅监督 assistant 的有效 token。
+三个输入均为 [B,T]。输出 [B,max(T-1,0)]，与 logits[:, :-1] 对齐。只有目标属于 assistant 且前后位置均有效时保留目标 token。
+? 将 token 和 assistant mask 右移一格，同时检查 source 与 target 的 valid。
+---
+    supervise = assistant[:,1:] & valid[:,1:] & valid[:,:-1]
+    return np.where(supervise, tokens[:,1:], ignore)
+---
+问题加回答 | (a([[1,2,3,4]]),a([[False,False,True,True]]),a([[True,True,True,False]])) => a([[-100,3,-100]])
+左侧填充 | (a([[0,7,8]]),a([[False,True,True]]),a([[False,True,True]]),-1) => a([[-1,8]])
+长度一 | (a([[10],[20]]),np.ones((2,1),dtype=bool),np.ones((2,1),dtype=bool)) => np.empty((2,0),dtype=int)

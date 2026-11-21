@@ -1,0 +1,209 @@
+@@ linear-sgd-step | Linear Regression SGD Step | 入门 | 经典机器学习 | N
+linear_step(x, y, w, b, lr)
+对带偏置的线性回归运行一次全批梯度下降。
+x 为 [N,D]，y 为 [N]，w 为 [D]。损失取 0.5·mean((xw+b-y)²)。返回更新后的 (w, b)。
+? 梯度由每个样本的残差乘以对应的特征再平均。
+---
+    error = x @ w + b - y
+    return w - lr * (x.T @ error / len(y)), b - lr * error.mean()
+---
+一步下降 | (a([[1.],[3.]]), a([2.,6.]), a([0.]), 0., .1) => (a([1.]), .4)
+零特征 | (np.zeros((2,2)), a([2.,4.]), a([0.,1.]), 1., .5) => (a([0.,1.]), 2.)
+非零初始化 | (a([[1.,2.],[3.,4.]]), a([7.,-1.]), a([.2,.5]), .7, .03)
+
+@@ ridge-regression | Ridge Regression with Intercept | 进阶 | 经典机器学习 | N
+fit_ridge(x, y, penalty)
+拟合带偏置的岭回归，偏置不参与正则化。
+最小化 sum((xw+b-y)²)+penalty·sum(w²)。penalty > 0，返回 (w,b)。x 为 [N,D]，y 为 [N]。
+? 对 x、y 中心化，求解线性系统，再从均值恢复偏置。
+---
+    xx = x - x.mean(axis=0)
+    yy = y - y.mean()
+    weight = np.linalg.solve(xx.T @ xx + penalty * np.eye(x.shape[1]), xx.T @ yy)
+    return weight, y.mean() - x.mean(axis=0) @ weight
+---
+单维可手算 | (a([[0.],[2.]]), a([1.,5.]), 2.) => (a([1.]), 2.)
+常数特征 | (np.ones((3,1)), a([0.,3.,6.]), .1) => (a([0.]), 3.)
+共线特征 | (a([[0.,0.],[2.,2.]]), a([1.,5.]), 2.) => (a([2/3,2/3]), 5/3)
+
+@@ logistic-step | Logistic Regression Gradient | 进阶 | 经典机器学习 | N
+logistic_gradient(x, y, w, b)
+计算带偏置的二分类 logistic regression 的平均损失梯度。
+返回 (dw, db)。x 为 [N,D]，y 为 0/1 向量，w 为 [D]。使用稳定的 sigmoid。
+? BCE 对 logit 的梯度可以化简为 sigmoid(logit) - label。
+---
+    logits = x @ w + b
+    error = np.exp(-np.logaddexp(0., -logits)) - y
+    return x.T @ error / len(y), error.mean()
+---
+零参数 | (a([[1.],[3.]]), a([0.,1.]), a([0.]), 0.) => (a([-.5]), 0.)
+高置信错误 | (a([[1000.],[-1000.]]), a([0.,1.]), a([1.]), 0.) => (a([1000.]), 0.)
+多个特征 | (np.eye(3), a([1.,0.,1.]), a([1.,2.,3.]), -.2)
+
+@@ knn-classifier | KNN Classifier with Tie-Breaking | 进阶 | 经典机器学习 | N
+knn_predict(train, labels, queries, k)
+对每个 query 做欧氏距离下的 KNN 分类。
+距离同分优先训练集索引较小的点。投票同分优先较小的整数 label。返回整数预测向量。
+? 用稳定排序取邻居；unique 的标签排序可顺便完成投票的 tie-break。
+---
+    squared = ((queries[:, None] - train[None, :]) ** 2).sum(axis=-1)
+    neighbors = np.argsort(squared, axis=1, kind="stable")[:, :k]
+    result = np.empty(len(queries), dtype=labels.dtype)
+    for i, index in enumerate(neighbors):
+        classes, count = np.unique(labels[index], return_counts=True)
+        result[i] = classes[count.argmax()]
+    return result
+---
+投票同分 | (a([[0.],[2.],[4.]]), a([9,2,9]), a([[1.],[4.]]), 2) => a([2,2])
+距离同分 | (a([[-1.],[1.]]), a([4,1]), a([[0.]]), 1) => a([4])
+负标签 | (a([[0.],[2.],[4.]]), a([-3,-3,7]), a([[4.]]), 3) => a([-3])
+
+@@ kmeans-update | K-Means Lloyd Iteration | 进阶 | 经典机器学习 | N
+lloyd_step(x, centers)
+执行一次 K-means 的 assignment 和 centroid 更新。
+给每个点分配最近中心，距离同分取最小索引。空簇保持旧中心。返回 (新中心, 本轮 labels)。
+? 先分配再求均值。更新中心期间不要重新分配。
+---
+    scores = ((x[:, None, :] - centers[None, :, :]) ** 2).sum(axis=2)
+    assignment = scores.argmin(axis=1)
+    updated = centers.copy()
+    for index in range(len(centers)):
+        points = x[assignment == index]
+        if len(points):
+            updated[index] = points.mean(axis=0)
+    return updated, assignment
+---
+两簇 | (a([[0.],[2.],[8.],[10.]]), a([[0.],[10.]])) => (a([[1.],[9.]]),a([0,0,1,1]))
+空簇和同分 | (a([[0.],[2.]]), a([[0.],[0.],[10.]])) => (a([[1.],[0.],[10.]]),a([0,0]))
+二维 | (a([[1.,0.],[1.,1.],[8.,7.]]), a([[0.,0.],[8.,8.]]))
+
+@@ kmeans-inertia | Cluster Inertia | 入门 | 经典机器学习 | N
+inertia(x, centers, labels)
+计算已有聚类分配的簇内误差平方和。
+x 为 [N,D]，centers 为 [K,D]，labels 为 [N] 的有效索引。空输入返回 0。
+? 先按 labels 取出每个点对应的中心。
+---
+    residual = x - centers[labels]
+    return float((residual ** 2).sum())
+---
+普通输入 | (a([[1.],[3.],[7.]]), a([[2.],[6.]]), a([0,0,1])) => 3.
+空输入 | (np.empty((0,2)), np.eye(2), a([],dtype=int)) => 0.
+分配已给出 | (a([[0.],[7.]]), a([[0.],[7.]]), a([1,0])) => 98.
+
+@@ gaussian-nb | Gaussian Naive Bayes Log-Joint | 进阶 | 经典机器学习 | N
+gaussian_nb(x, means, variance, priors)
+计算各类别的 Gaussian Naive Bayes log joint 分数。
+x 为 [N,D]，means、variance 为 [C,D]，priors 为长度 C 的正概率数组。方差最小取 1e-8。返回 [N,C]。
+? 按独立特征求 Gaussian log-density，再加上 log prior。
+---
+    safe = np.maximum(variance, 1e-8)
+    difference = x[:, None, :] - means[None, :, :]
+    log_density = -.5 * (np.log(2 * np.pi * safe) + difference ** 2 / safe)
+    return log_density.sum(axis=-1) + np.log(priors)
+---
+均值处的概率 | (a([[0.]]), a([[0.],[1.]]), a([[1.],[1.]]), a([.5,.5])) => a([[0.,-.5]])-.5*np.log(2*np.pi)+np.log(.5)
+零方差 | (a([[0.]]), a([[0.]]), a([[0.]]), a([1.])) => a([[-.5*np.log(2*np.pi*1e-8)]])
+多特征 | (a([[1.,5.],[-2.,3.]]), a([[.1,5.],[2.,3.]]), a([[2.,.2],[1.,5.]]), a([.25,.75]))
+
+@@ gmm-responsibilities | GMM E-Step from Log-Densities | 进阶 | 经典机器学习 | N
+responsibilities(log_density, weights)
+从混合分布的分量 log-density 和混合权重得到 E-step 后验。
+log_density 为 [N,K]，weights 为非负且和为 1 的向量。每行至少有一个带正权重的有限分数。返回 [N,K]。
+? log prior 加到各分量后做稳定归一化，零权重的分量应是零。
+---
+    log_prior = np.full(weights.shape, -np.inf, dtype=float)
+    np.log(weights, out=log_prior, where=weights > 0)
+    joint = log_density + log_prior
+    likelihood = np.exp(joint - joint.max(axis=1, keepdims=True))
+    return likelihood / likelihood.sum(axis=1, keepdims=True)
+---
+密度相等看先验 | (a([[-1000.,-1000.]]), a([.25,.75])) => a([[.25,.75]])
+零权重 | (a([[1000.,-1000.]]), a([0.,1.])) => a([[0.,1.]])
+密度不同 | (a([[np.log(3.),0.],[0.,np.log(3.)]]), a([.5,.5])) => a([[.75,.25],[.25,.75]])
+
+@@ label-entropy | Entropy from Class Counts | 入门 | 经典机器学习 | N
+label_entropy(counts)
+根据类别计数计算以 2 为底的 Shannon entropy。
+counts 为一维非负向量。总计数为 0 时返回 0。零计数类别不贡献熵。
+? 只对正概率取 log2。
+---
+    positive = counts[counts > 0]
+    if not len(positive):
+        return 0.
+    probabilities = positive / positive.sum()
+    return float(-np.sum(probabilities * np.log2(probabilities)))
+---
+平衡二分类 | (a([4,4,0]),) => 1.
+空计数 | (a([0,0]),) => 0.
+偏置分布 | (a([3,1]),) => -.75*np.log2(.75)-.25*np.log2(.25)
+
+@@ decision-stump | Best Binary Decision Stump | 挑战 | 经典机器学习 | N
+best_stump(values, labels)
+在单个连续特征上拟合使用 Gini impurity 的二分类决策树桩。
+只在相邻不同值的中点切分。返回 (threshold, weighted_gini)，同分选最小阈值。若无切分，返回 (None, 原 Gini)。
+? 排序后前缀累计正样本数，一次向量化算出全部候选切分的两侧不纯度。
+---
+    order = np.argsort(values, kind="stable")
+    ordered = values[order]
+    positive = np.cumsum(labels[order])
+    n = len(values)
+    cut = np.flatnonzero(ordered[1:] != ordered[:-1]) + 1
+    if not len(cut):
+        rate = positive[-1] / n
+        return None, float(2. * rate * (1. - rate))
+    left_rate = positive[cut - 1] / cut
+    right_rate = (positive[-1] - positive[cut - 1]) / (n - cut)
+    loss = (cut * left_rate * (1-left_rate) + (n-cut) * right_rate * (1-right_rate)) * (2/n)
+    best = cut[np.flatnonzero(np.isclose(loss, loss.min(), rtol=0., atol=1e-12))[0]]
+    return float((ordered[best - 1] + ordered[best]) / 2), float(loss[cut == best][0])
+---
+完美阈值 | (a([3.,1.,4.,2.]), a([1,0,1,0])) => (2.5,0.)
+无切分点 | (a([7.,7.]), a([0,1])) => (None,.5)
+左右同分 | (a([0.,1.,2.]), a([0,1,0])) => (.5,1/3)
+
+@@ pca-fit | Principal Components via SVD | 进阶 | 经典机器学习 | N
+pca(x, k)
+用 SVD 拟合 PCA，返回 (scores, sample_variance)。
+x 为 [N,D]，N 至少为 2，k ≤ min(N,D)。按方差降序。各分量绝对值最大的 loading 为正，同绝对值取索引最小。测试回避退化方向。
+? 对 x 中心化。用 V 的行做投影，奇异值平方除以 N-1 得到解释方差。
+---
+    centered = x - x.mean(axis=0)
+    _, singular, vec = np.linalg.svd(centered, full_matrices=False)
+    basis = vec[:k].copy()
+    pivots = np.abs(basis).argmax(axis=1)
+    sign = np.sign(basis[np.arange(k), pivots])
+    return centered @ (basis * sign[:, None]).T, singular[:k] ** 2 / (len(x) - 1)
+---
+一维主方向 | (a([[-2.,3.],[0.,3.],[2.,3.]]), 1) => (a([[-2.],[0.],[2.]]),a([4.]))
+先按方差排序 | (a([[1.,4.],[1.,-4.],[-1.,-4.],[-1.,4.]]), 2) => (a([[4.,1.],[-4.,1.],[-4.,-1.],[4.,-1.]]),a([64/3,4/3]))
+单特征 | (a([[2.],[8.]]), 1) => (a([[-3.],[3.]]),a([18.]))
+
+@@ power-iteration | Power Iteration | 进阶 | 经典机器学习 | N
+power_iteration(matrix, initial, steps)
+从指定初始向量做 steps 次幂迭代。
+矩阵为非零正定对称矩阵。initial 非零。每步做 L2 归一化，返回 (vector, rayleigh_quotient)。steps 可以为零。
+? Rayleigh quotient 等于归一化向量两边夹同一个 matrix。
+---
+    vec = initial / np.linalg.norm(initial)
+    for _ in range(steps):
+        candidate = matrix @ vec
+        vec = candidate / np.linalg.norm(candidate)
+    return vec, float(vec @ matrix @ vec)
+---
+一次迭代 | (a([[2.,0.],[0.,1.]]), a([1.,1.]), 1) => (a([2.,1.])/np.sqrt(5),1.8)
+初始在特征方向 | (a([[3.,1.],[1.,3.]]), a([1.,-1.]), 5) => (a([1.,-1.])/np.sqrt(2),2.)
+零迭代 | (np.eye(2), a([3.,4.]), 0) => (a([.6,.8]),1.)
+
+@@ multinomial-nb | Multinomial Naive Bayes | 进阶 | 经典机器学习 | N
+multinomial_nb(doc, token_counts, prior, alpha)
+给出已经按类别统计的词频，计算文档的 Naive Bayes log joint。
+doc 为 [N,V]，token_counts 为 [C,V]。prior 为全正类别概率，alpha > 0。使用加 alpha 平滑，返回 [N,C]。
+? 在类别内部对词频加平滑后归一化，再对文档词频做加权求和。
+---
+    counts = token_counts + alpha
+    log_prob = np.log(counts) - np.log(counts.sum(axis=1, keepdims=True))
+    return doc @ log_prob.T + np.log(prior)
+---
+词在不同类别 | (a([[1,0],[0,1]]), a([[2,0],[0,2]]), a([.5,.5]), 1.) => np.log(a([[.375,.125],[.125,.375]]))
+空文档 | (a([[0,0,0]]), a([[0,0,0],[4,2,1]]), a([.1,.9]), .5) => np.log(a([[.1,.9]]))
+单词表 | (a([[5],[8]]), a([[3],[0]]), a([.6,.4]), 1.) => np.log(a([[.6,.4],[.6,.4]]))

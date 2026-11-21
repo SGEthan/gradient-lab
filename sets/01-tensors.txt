@@ -1,0 +1,166 @@
+@@ logsumexp | LogSumExp | 入门 | 张量与数值 | N
+logsumexp(x, axis=-1)
+沿指定轴计算 log(sum(exp(x)))，避免大数溢出。
+x 是有限浮点值组成的非空数组。移除被归约的轴。
+? 每个 slice 先减最大值，取对数后加回来。
+---
+    pivot = np.max(x, axis=axis, keepdims=True)
+    result = pivot + np.log(np.exp(x - pivot).sum(axis=axis, keepdims=True))
+    return np.squeeze(result, axis=axis)[()] if x.ndim == 1 else np.squeeze(result, axis=axis)
+---
+千级 logits | (a([[1000.,1000.],[-1000.,-1000.]]), -1) => a([1000.,-1000.])+np.log(2.)
+按列归约 | (a([[0.,0.],[0.,0.]]), 0) => a([np.log(2.),np.log(2.)])
+向量 | (a([0.,1.,2.]), 0) => np.log(1+np.e+np.e**2)
+
+@@ log-softmax | Stable Log-Softmax | 进阶 | 张量与数值 | N
+log_softmax(x, axis=-1)
+计算对数 softmax，保留原形状。
+x 由有限浮点值组成。极小概率的 log 仍应有限。
+? 直接以移位后的 logits 减 log-normalizer，避免先得到零概率。
+---
+    shifted = x - x.max(axis=axis, keepdims=True)
+    return shifted - np.log(np.exp(shifted).sum(axis=axis, keepdims=True))
+---
+大幅分离 | (a([[1000.,-1000.]]), -1) => a([[0.,-2000.]])
+相同分数 | (a([[0.,0.],[0.,0.]]), 0) => np.full((2,2),-np.log(2.))
+三维负轴 | (np.arange(24.).reshape(2,3,4), -2)
+
+@@ one-hot | One-Hot with Ignore Index | 入门 | 张量与数值 | N
+one_hot(labels, classes, ignore=-1)
+把任意形状的整数标签扩展为 one-hot 编码。忽略标签所在行保留全零。
+有效标签在 [0, classes)。输出最后一维长度是 classes，元素为浮点数。
+? 用广播比较标签和类别编号，再应用有效性 mask。
+---
+    encoded = labels[..., None] == np.arange(classes)
+    return (encoded & (labels != ignore)[..., None]).astype(float)
+---
+忽略标签 | (a([1,-1,0]), 3) => a([[0.,1.,0.],[0.,0.,0.],[1.,0.,0.]])
+二维输入 | (a([[0],[1]]), 2) => a([[[1.,0.]],[[0.,1.]]])
+自定义忽略值 | (a([1,2]), 3, 2) => a([[0.,1.,0.],[0.,0.,0.]])
+
+@@ masked-mean | Masked Mean Pooling | 入门 | 张量与数值 | N
+masked_mean(x, valid)
+对序列上的有效 token 向量求平均。
+x 为 [B,T,D]，valid 为 [B,T] 布尔数组。全空序列输出零，写入 NaN 的无效行也须被忽略。
+? 用 where 替换无效行。NaN 乘零仍是 NaN。
+---
+    count = valid.sum(axis=1, keepdims=True)
+    return np.where(valid[..., None], x, 0.).sum(axis=1) / np.maximum(count, 1)
+---
+忽略填充 | (a([[[1.,3.],[9.,9.],[3.,5.]]]), a([[True,False,True]])) => a([[2.,4.]])
+全空与 NaN | (a([[[np.nan,2.]]]), a([[False]])) => a([[0.,0.]])
+不同样本长度 | (np.arange(24.).reshape(2,3,4), a([[True,True,False],[False,False,True]]))
+
+@@ scatter-sum | Scatter-Add by Index | 进阶 | 张量与数值 | N
+scatter_sum(values, indices, size)
+把 N 个 D 维向量按索引累加进 size 个桶。
+values 为 [N,D]，indices 为 [N]，重复索引须全部累加。未写入桶为零。
+? 高级索引的 += 会丢掉部分重复写入。想想 np.add.at。
+---
+    output = np.zeros((size, values.shape[1]), dtype=values.dtype)
+    np.add.at(output, indices, values)
+    return output
+---
+重复索引 | (a([[1.,2.],[3.,4.],[5.,6.]]), a([1,0,1]), 3) => a([[3.,4.],[6.,8.],[0.,0.]])
+空输入 | (np.zeros((0,2)), a([],dtype=int), 2) => np.zeros((2,2))
+单桶 | (a([[1.],[-3.],[2.]]), a([0,0,0]), 1) => a([[0.]])
+
+@@ gather-rows | Batched Row Gather | 入门 | 张量与数值 | N
+gather_rows(x, idx)
+每个 batch 单独从输入的 T 行取出指定行。
+x 为 [B,T,D]，idx 为 [B,K] 的有效非负索引，返回 [B,K,D]，保留索引顺序和重复项。
+? 为每个 batch 创建一个可广播的行选择器。
+---
+    return x[np.arange(x.shape[0])[:, None], idx]
+---
+独立索引 | (np.arange(8).reshape(2,2,2), a([[1,1],[0,1]])) => a([[[2,3],[2,3]],[[4,5],[6,7]]])
+无选中项 | (np.zeros((2,3,4)), np.zeros((2,0),dtype=int)) => np.zeros((2,0,4))
+不同维度 | (np.arange(24).reshape(2,4,3), a([[3],[1]]))
+
+@@ pairwise-l2 | Pairwise Squared Distance | 入门 | 张量与数值 | N
+pairwise_squared(x, y)
+计算两组向量之间的两两平方欧氏距离。
+x 为 [N,D]，y 为 [M,D]，返回 [N,M]。避免构造 [N,M,D] 中间数组，把数值舍入得到的小负值截为零。
+? 展开 ||x-y||²，把范数和矩阵乘法分开。
+---
+    x_sq = (x * x).sum(axis=1)[:, None]
+    y_sq = (y * y).sum(axis=1)[None, :]
+    return np.maximum(x_sq + y_sq - 2. * (x @ y.T), 0.)
+---
+两组向量 | (a([[0.,0.],[1.,2.]]), a([[1.,1.],[2.,2.]])) => a([[2.,8.],[1.,1.]])
+重合向量 | (a([[.3,.4]]), a([[.3,.4]])) => a([[0.]])
+不同样本数 | (np.arange(15.).reshape(5,3), np.arange(6.).reshape(2,3))
+
+@@ standardization | Feature Standardization | 入门 | 张量与数值 | N
+standardize(x)
+逐列把一批特征标准化。常数列变成零。
+输入为 [N,D] 的有限浮点数组，N 至少为 1。使用总体标准差。
+? 对标准差为零的列把分母换成 1。
+---
+    mean = x.mean(axis=0)
+    spread = x.std(axis=0)
+    return (x - mean) / np.where(spread == 0, 1., spread)
+---
+常数列 | (a([[1.,8.],[3.,8.]]),) => a([[-1.,0.],[1.,0.]])
+只有一行 | (a([[3.,-5.,2.]]),) => np.zeros((1,3))
+多特征 | (a([[2.,9.],[3.,1.],[6.,-1.]]),)
+
+@@ cosine-topk | Cosine Top-K Retrieval | 进阶 | 张量与数值 | N
+cosine_topk(query, keys, k)
+对每个 query 找到余弦相似度最高的 k 个样本。
+query 为 [Q,D]，keys 为 [N,D]，返回 [Q,k] 的整数索引。零向量相似度为 0。同分优先索引小者。
+? L2 归一化后矩阵相乘，再对负分数稳定排序。
+---
+    query_norm = np.linalg.norm(query, axis=1, keepdims=True)
+    key_norm = np.linalg.norm(keys, axis=1, keepdims=True)
+    query = query / np.where(query_norm == 0, 1., query_norm)
+    keys = keys / np.where(key_norm == 0, 1., key_norm)
+    return np.argsort(-(query @ keys.T), axis=1, kind="stable")[:, :k]
+---
+同分优先小索引 | (a([[1.,0.]]), a([[0.,1.],[2.,0.],[4.,0.]]), 2) => a([[1,2]])
+零向量 | (a([[0.,0.]]), a([[1.,1.],[-1.,-1.]]), 2) => a([[0,1]])
+多个 query | (np.eye(2), a([[0.,-1.],[0.,1.],[2.,0.]]), 1) => a([[2],[1]])
+
+@@ pad-ragged | Pad a Ragged Batch | 入门 | 张量与数值 | N
+pad_batch(sequences, pad=0)
+将变长整数序列右侧填充到共同长度，同时返回有效位置。
+输入为整数列表的列表。返回 (tokens, valid)，两者形状 [B,T]，valid 为布尔数组。空 batch 的 T 为 0。
+? 分别分配整数矩阵和布尔矩阵，每行填入原有前缀。
+---
+    width = max(map(len, sequences), default=0)
+    tokens = np.full((len(sequences), width), pad, dtype=int)
+    valid = np.zeros(tokens.shape, dtype=bool)
+    for i, row in enumerate(sequences):
+        tokens[i, :len(row)] = row
+        valid[i, :len(row)] = True
+    return tokens, valid
+---
+变长序列 | ([[1,0],[2],[]], -1) => (a([[1,0],[2,-1],[-1,-1]]),a([[True,True],[True,False],[False,False]]))
+空 batch | ([], 9) => (np.zeros((0,0),dtype=int),np.zeros((0,0),dtype=bool))
+仅空行 | ([[],[]],) => (np.zeros((2,0),dtype=int),np.zeros((2,0),dtype=bool))
+
+@@ stable-sigmoid | Stable Sigmoid | 入门 | 张量与数值 | N
+stable_sigmoid(x)
+对张量逐元素实现 sigmoid，处理绝对值很大的 logits。
+返回与 x 同形状的浮点数组。避免对大正数取指数。
+? 用 exp(-abs(x)) 统一控制指数的动态范围。
+---
+    scaled = np.exp(-np.abs(x))
+    return np.where(x >= 0, 1. / (1. + scaled), scaled / (1. + scaled))
+---
+极端 logits | (a([-1000.,0.,1000.]),) => a([0.,.5,1.])
+二维输入 | (a([[-1.,1.]]),) => a([[1/(1+np.e),np.e/(1+np.e)]])
+空数组 | (np.zeros((0,2)),) => np.zeros((0,2))
+
+@@ covariance | Sample Covariance Matrix | 进阶 | 张量与数值 | N
+sample_covariance(x)
+计算 D 个特征之间的样本协方差矩阵。
+x 为 [N,D]，N 至少为 2。返回 [D,D]，使用 N-1 做分母。
+? 每列中心化后计算中心化矩阵的 Gram 矩阵。
+---
+    centered = x - x.mean(axis=0)
+    return centered.T @ centered / (x.shape[0] - 1)
+---
+完全线性相关 | (a([[1.,2.],[3.,6.],[5.,10.]]),) => a([[4.,8.],[8.,16.]])
+单维特征 | (a([[2.],[4.]]),) => a([[2.]])
+负协方差 | (a([[1.,9.],[2.,6.],[3.,3.]]),) => a([[1.,-3.],[-3.,9.]])

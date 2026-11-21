@@ -1,0 +1,12 @@
+(version 1)
+(allow default)
+(deny network*)
+(deny file-write*)
+(allow file-write* (subpath (param "scratch")))
+(deny file-read-data (subpath (param "home")))
+(allow file-read-data
+    (subpath (param "runtime"))
+    (subpath (param "sets"))
+    (literal (param "core"))
+    (literal (param "runner"))
+    (literal (param "questions")))

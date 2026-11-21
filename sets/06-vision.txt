@@ -1,0 +1,191 @@
+@@ conv2d | 2D Cross-Correlation | 进阶 | 视觉与三维 | N
+conv2d(image, kernel, stride, padding)
+实现单通道、带 stride 和零填充的二维卷积层前向，采用深度学习里的互相关约定。
+image 为 [H,W]，kernel 为 [Kh,Kw]。padding 对四边相同，stride 为正整数。只保留完整覆盖 kernel 的窗口。
+? 先做零填充，再按 stride 在两个空间轴上取窗口。卷积核保持原来的方向。
+---
+    padded = np.pad(image, padding)
+    kh, kw = kernel.shape
+    rows = range(0, padded.shape[0]-kh+1, stride)
+    cols = range(0, padded.shape[1]-kw+1, stride)
+    result = np.empty((len(rows),len(cols)), dtype=np.result_type(image,kernel))
+    for i, y in enumerate(rows):
+        for j, x in enumerate(cols):
+            result[i,j] = np.sum(padded[y:y+kh,x:x+kw] * kernel)
+    return result
+---
+非对称卷积核 | (a([[1.,2.,3.],[4.,5.,6.]]),a([[1.,2.],[0.,-1.]]),1,0) => a([[0.,2.]])
+有填充和 stride | (a([[1.,2.],[3.,4.]]),np.ones((2,2)),2,1) => a([[1.,2.],[3.,4.]])
+窗口过大 | (np.ones((1,1)),np.ones((2,2)),1,0) => np.empty((0,0))
+
+@@ max-pool | Spatial Max Pooling | 入门 | 视觉与三维 | N
+max_pool(x, size, stride)
+在最后两个轴做 max pool，丢弃不完整边界窗口。
+x 为 [B,C,H,W]，size、stride 为正整数。输入可全负。返回 [B,C,Hout,Wout]。
+? 每个池化窗口只归约 H/W 两轴，保留 batch 与通道。
+---
+    rows = range(0, x.shape[-2]-size+1, stride)
+    cols = range(0, x.shape[-1]-size+1, stride)
+    out = np.empty((*x.shape[:2],len(rows),len(cols)),dtype=x.dtype)
+    for i, y in enumerate(rows):
+        for j, z in enumerate(cols):
+            out[:,:,i,j] = x[:,:,y:y+size,z:z+size].max(axis=(-2,-1))
+    return out
+---
+全负特征 | (a([[[[-1.,-2.,-3.],[-4.,-5.,-6.]]]]),2,1) => a([[[[-1.,-2.]]]])
+丢弃边界 | (np.arange(36.).reshape(1,1,6,6),3,2) => a([[[[14.,16.],[26.,28.]]]])
+保留通道 | (np.arange(18.).reshape(1,2,3,3),1,2) => a([[[[0.,2.],[6.,8.]],[[9.,11.],[15.,17.]]]])
+
+@@ patchify | Patchify RGB Image Batch | 进阶 | 视觉与三维 | N
+patchify(images, patch_size)
+把一批图像切成 ViT 输入的非重叠 patch tokens。
+输入为 [B,H,W,C]，H、W 都可整除 patch_size。patch 先按行后按列排列，向量内以行、列、通道顺序展开。
+? 把 H/W 拆为 patch 索引和 patch 内坐标，再 transpose。
+---
+    b,h,w,c = images.shape
+    p = patch_size
+    return images.reshape(b,h//p,p,w//p,p,c).transpose(0,1,3,2,4,5).reshape(b,(h//p)*(w//p),p*p*c)
+---
+两个图块 | (np.arange(8).reshape(1,2,4,1),2) => a([[[0,1,4,5],[2,3,6,7]]])
+两个通道 | (np.arange(8).reshape(1,2,2,2),1) => a([[[0,1],[2,3],[4,5],[6,7]]])
+两个 batch | (np.arange(32).reshape(2,4,4,1),2)
+
+@@ box-iou | Pairwise Box IoU | 入门 | 视觉与三维 | N
+box_iou(a_boxes, b_boxes)
+计算两组轴对齐 2D box 的两两 IoU。
+每个 box 为 [x1,y1,x2,y2]，使用连续坐标。宽高非负，并集为零时 IoU 为零。返回 [N,M]。
+? 交集的左上角取 max，右下角取 min。交集的负宽高裁到零。
+---
+    size = np.maximum(np.minimum(a_boxes[:,None,2:],b_boxes[None,:,2:]) -
+                      np.maximum(a_boxes[:,None,:2],b_boxes[None,:,:2]), 0.)
+    intersection = np.prod(size,axis=-1)
+    union = np.prod(a_boxes[:,2:] - a_boxes[:,:2],axis=-1)[:,None] + np.prod(b_boxes[:,2:] - b_boxes[:,:2],axis=-1)[None,:] - intersection
+    return np.divide(intersection,union,out=np.zeros_like(intersection,dtype=float),where=union>0)
+---
+部分交叠 | (a([[0.,0.,2.,2.]]),a([[1.,1.,3.,3.],[3.,3.,4.,4.]])) => a([[1/7,0.]])
+退化边框 | (a([[0.,0.,0.,1.]]),a([[0.,0.,0.,1.]])) => a([[0.]])
+边缘相接 | (a([[0.,0.,1.,1.],[2.,2.,3.,3.]]),a([[1.,0.,2.,1.]])) => a([[0.],[0.]])
+
+@@ nms | Greedy Non-Maximum Suppression | 进阶 | 视觉与三维 | N
+nms(boxes, scores, threshold)
+按置信度降序执行 greedy NMS。
+框采用连续 xyxy 坐标。同分优先原索引小者。选中框后去掉 IoU 严格大于 threshold 的候选。返回保留的索引列表。
+? 每轮只拿最前面的框与剩余候选批量比较，避免提前排除间接相邻框。
+---
+    order = np.argsort(-scores,kind="stable")
+    area = np.prod(boxes[:,2:]-boxes[:,:2],axis=1)
+    keep = []
+    while order.size:
+        index = order[0]
+        keep.append(int(index))
+        rest = order[1:]
+        intersection = np.prod(np.maximum(np.minimum(boxes[index,2:],boxes[rest,2:]) -
+                                          np.maximum(boxes[index,:2],boxes[rest,:2]),0.),axis=1)
+        union = area[index]+area[rest]-intersection
+        iou = np.divide(intersection,union,out=np.zeros_like(intersection,dtype=float),where=union>0)
+        order = rest[iou<=threshold]
+    return keep
+---
+移除重复框 | (a([[0.,0.,2.,2.],[0.,0.,2.,2.],[3.,3.,4.,4.]]),a([.8,.9,.7]),.5) => [1,2]
+阈值严格大于 | (a([[0.,0.,2.,2.],[0.,0.,2.,1.]]),a([.8,.8]),.5) => [0,1]
+空检测 | (np.empty((0,4)),a([]),.5) => []
+
+@@ bilinear-sample | Bilinear Feature Sampling | 进阶 | 视觉与三维 | N
+bilinear_sample(feature, coordinates)
+在二维特征图的 (x,y) 浮点坐标处做双线性插值。
+feature 为 [H,W,C]，coordinates 为 [N,2]。整点坐标对应像素中心，超界坐标先夹到边界。返回 [N,C]。
+? 分别计算左/右列及上/下行，对四个角按 x/y 距离加权。
+---
+    x = np.clip(coordinates[:,0],0,feature.shape[1]-1)
+    y = np.clip(coordinates[:,1],0,feature.shape[0]-1)
+    x0, y0 = x.astype(int), y.astype(int)
+    x1, y1 = np.minimum(x0+1,feature.shape[1]-1), np.minimum(y0+1,feature.shape[0]-1)
+    fx, fy = (x-x0)[:,None], (y-y0)[:,None]
+    top = (1-fx)*feature[y0,x0]+fx*feature[y0,x1]
+    bottom = (1-fx)*feature[y1,x0]+fx*feature[y1,x1]
+    return (1-fy)*top+fy*bottom
+---
+取方格中心 | (a([[[0.],[2.]],[[4.],[6.]]]),a([[.5,.5],[1.,0.]])) => a([[3.],[2.]])
+坐标越界 | (a([[[1.,5.],[2.,6.]]]),a([[-3.,4.],[9.,-9.]])) => a([[1.,5.],[2.,6.]])
+不对称权重 | (a([[[1.],[5.]],[[2.],[6.]]]),a([[.25,.75]])) => a([[2.75]])
+
+@@ image-channel-normalize | Normalize Image Channels | 入门 | 视觉与三维 | N
+normalize_image(image, mean, std)
+将 uint8 图像转为浮点并做逐通道标准化。
+输入形状 [...,C]，像素范围为 0–255。每通道先除以 255，再减 mean、除 std。std 为正。
+? mean/std 是一维向量，可广播到空间和 batch 维度。
+---
+    return (image.astype(float)/255. - mean) / std
+---
+两个通道 | (a([[[0,255],[255,0]]],dtype=np.uint8),a([.5,.5]),a([.25,.5])) => a([[[-2.,1.],[2.,-1.]]])
+单通道 | (a([[[128]]],dtype=np.uint8),a([0.]),a([1.])) => a([[[128/255]]])
+空 batch | (np.empty((0,2,2,3),dtype=np.uint8),np.zeros(3),np.ones(3)) => np.empty((0,2,2,3))
+
+@@ depth-unprojection | Backproject Depth into a Pointmap | 进阶 | 视觉与三维 | N
+backproject(depth, fx, fy, cx, cy)
+使用针孔相机内参把深度图转换为相机坐标系中的点图。
+depth 为 [H,W]，值为沿光轴的深度。像素坐标 (u,v) 对应列、行，下标从 0 开始。返回 [H,W,3] 的 (X,Y,Z)。
+? X=(u-cx)·Z/fx，Y=(v-cy)·Z/fy，最后按坐标轴 stack。
+---
+    v,u = np.indices(depth.shape)
+    return np.stack(((u-cx)*depth/fx,(v-cy)*depth/fy,depth),axis=-1)
+---
+主点偏移 | (a([[2.,4.],[6.,8.]]),2.,4.,1.,0.) => a([[[-1.,0.,2.],[0.,0.,4.]],[[-3.,1.5,6.],[0.,2.,8.]]])
+零深度 | (np.zeros((1,2)),3.,5.,2.,8.) => np.zeros((1,2,3))
+单点 | (a([[4.]]),1.,2.,1.,2.) => a([[[-4.,-4.,4.]]])
+
+@@ batched-point-transform | Batched Rigid Point Transform | 进阶 | 视觉与三维 | N
+transform_points(points, rotation, translation)
+对每个 batch 的相机坐标点应用 camera-to-world 变换。
+points 为 [B,N,3]，rotation 为 [B,3,3]，translation 为 [B,3]。采用列向量约定 p_world=Rp+t。
+? points 的最后一维是行形式，做批量矩阵乘法时对 R 的最后两轴转置。
+---
+    return points @ np.swapaxes(rotation,-1,-2) + translation[:,None,:]
+---
+旋转再平移 | (a([[[1.,0.,0.],[0.,1.,0.]]]),a([[[0.,-1.,0.],[1.,0.,0.],[0.,0.,1.]]]),a([[3.,4.,5.]])) => a([[[3.,5.,5.],[2.,4.,5.]]])
+多 batch 平移 | (np.zeros((2,1,3)),np.tile(np.eye(3),(2,1,1)),a([[1.,2.,3.],[4.,5.,6.]])) => a([[[1.,2.,3.]],[[4.,5.,6.]]])
+空点集 | (np.empty((1,0,3)),np.eye(3)[None],np.zeros((1,3))) => np.empty((1,0,3))
+
+@@ relative-pose | Relative Pose from Camera-to-World | 进阶 | 视觉与三维 | N
+relative_pose(previous, current)
+由前一帧和当前帧 camera-to-world pose 计算当前相机坐标转到前一相机坐标的变换。
+输入为 [4,4] 的刚体齐次变换矩阵。输出为 [4,4]。采用列向量约定。
+? 相对变换是 inv(previous)@current。刚体逆的旋转是 R.T，平移是 -R.T@t。
+---
+    inverse = np.eye(4)
+    inverse[:3,:3] = previous[:3,:3].T
+    inverse[:3,3] = -inverse[:3,:3] @ previous[:3,3]
+    return inverse @ current
+---
+纯平移 | (a([[1.,0.,0.,1.],[0.,1.,0.,2.],[0.,0.,1.,3.],[0.,0.,0.,1.]]),np.eye(4)) => a([[1.,0.,0.,-1.],[0.,1.,0.,-2.],[0.,0.,1.,-3.],[0.,0.,0.,1.]])
+同一姿态 | (a([[0.,-1.,0.,2.],[1.,0.,0.,0.],[0.,0.,1.,3.],[0.,0.,0.,1.]]),a([[0.,-1.,0.,2.],[1.,0.,0.,0.],[0.,0.,1.,3.],[0.,0.,0.,1.]])) => np.eye(4)
+旋转相对位移 | (a([[0.,-1.,0.,0.],[1.,0.,0.,0.],[0.,0.,1.,0.],[0.,0.,0.,1.]]),a([[0.,-1.,0.,1.],[1.,0.,0.,0.],[0.,0.,1.,0.],[0.,0.,0.,1.]])) => a([[1.,0.,0.,0.],[0.,1.,0.,-1.],[0.,0.,1.,0.],[0.,0.,0.,1.]])
+
+@@ chamfer | Symmetric Squared Chamfer Distance | 进阶 | 视觉与三维 | N
+chamfer(points, reference)
+计算两个非空点集之间的双向平均平方最近邻距离之和。
+points 为 [N,D]，reference 为 [M,D]。每个方向先独立按来源点数求均值，再将两个方向相加。
+? 构造两两平方距离矩阵，分别沿两个轴取 min。
+---
+    squared = ((points[:,None]-reference[None,:])**2).sum(axis=-1)
+    return float(squared.min(axis=1).mean()+squared.min(axis=0).mean())
+---
+不同的点数 | (a([[0.],[2.]]),a([[0.]])) => 2.
+集合顺序无关 | (a([[0.,1.],[2.,3.]]),a([[2.,3.],[0.,1.]])) => 0.
+非均匀距离 | (a([[0.],[4.]]),a([[1.],[9.]])) => 18.
+
+@@ voxel-mean | Voxel Feature Pooling | 挑战 | 视觉与三维 | N
+voxel_mean(points, features, size)
+把三维点落到网格中，对同 voxel 的特征求均值。
+points 为 [N,3]，features 为 [N,D]，size 为正。网格坐标为 floor(points/size)，包含负坐标。返回 (按字典序排序的网格坐标, 对应均值特征)。
+? unique(axis=0) 可同时返回网格逆索引和计数，用 add.at 累加。
+---
+    grid = np.floor(points / size).astype(int)
+    unique, inverse, count = np.unique(grid,axis=0,return_inverse=True,return_counts=True)
+    summed = np.zeros((len(unique),features.shape[1]),dtype=float)
+    np.add.at(summed,inverse,features)
+    return unique, summed / count[:,None]
+---
+边界与负值 | (a([[.1,0.,0.],[.9,0.,0.],[-.1,0.,0.]]),a([[2.],[6.],[10.]]),1.) => (a([[-1,0,0],[0,0,0]]),a([[10.],[4.]]))
+多通道排序 | (a([[1.,0.,2.],[1.,0.,0.]]),a([[6.,7.],[2.,3.]]),.5) => (a([[2,0,0],[2,0,4]]),a([[2.,3.],[6.,7.]]))
+空场景 | (np.empty((0,3)),np.empty((0,2)),1.) => (np.empty((0,3),dtype=int),np.empty((0,2)))

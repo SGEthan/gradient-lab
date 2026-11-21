@@ -1,0 +1,274 @@
+@@ stratified-split | Deterministic Stratified Split | 进阶 | 数据与流式系统 | N
+stratified_split(labels, fraction)
+按类别划分训练与验证索引，每个类别选最后一段作为验证集。
+对每个类别按原次序保留，最后 floor(count·fraction) 个进验证集。返回 (train_idx,validation_idx)，两者按原全局索引升序。fraction ∈ [0,1]。
+? 汇总每类验证位置到一个布尔数组，剩余位置自然是训练集。
+---
+    valid = np.zeros(len(labels),dtype=bool)
+    for category in np.unique(labels):
+        idx = np.flatnonzero(labels==category)
+        count = int(np.floor(len(idx)*fraction))
+        if count:
+            valid[idx[-count:]] = True
+    return np.flatnonzero(~valid), np.flatnonzero(valid)
+---
+不均衡类别 | (a([0,1,0,0,1,2]),.5) => (a([0,1,2,5]),a([3,4]))
+零比例 | (a([1,1,3]),0.) => (a([0,1,2]),a([],dtype=int))
+全部验证 | (a([5,0,5]),1.) => (a([],dtype=int),a([0,1,2]))
+
+@@ token-budget-batch | Greedy Token-Budget Batches | 进阶 | 数据与流式系统 | P
+budget_batches(lengths, budget)
+按输入顺序把序列贪心打包成 mini-batches，控制 padding 后 token 数。
+batch 成本为 max(length)·样本数。输入正长度且每个长度都不大于预算。每个 batch 尽量塞满连续样本，返回由原始索引列表组成的列表。
+? 用当前 batch 的最大长度判断加下一个样本后是否超预算。
+---
+    batches = []
+    pending = []
+    width = 0
+    for index, length in enumerate(lengths):
+        if pending and max(width,length)*(len(pending)+1) > budget:
+            batches.append(pending)
+            pending = []
+            width = 0
+        pending.append(index)
+        width = max(width,length)
+    if pending:
+        batches.append(pending)
+    return batches
+---
+padding 影响打包 | ([2,3,4,1,2],8) => [[0,1],[2,3],[4]]
+刚好满预算 | ([2,2,2,2],6) => [[0,1,2],[3]]
+没有序列 | ([],10) => []
+
+@@ online-variance | Welford Streaming Mean and Variance | 进阶 | 数据与流式系统 | P
+stream_variance(values)
+从单次迭代器计算均值和无偏样本方差，避免相减两个大平方数。
+返回 (mean,variance)。空输入返回 (0,0)，单个值的方差为 0。跨元素状态保持常数空间。
+? 更新均值后，M2 增量是同一个数到旧均值和新均值的距离之积。
+---
+    count = 0
+    mean = 0.
+    m2 = 0.
+    for number in values:
+        count += 1
+        delta = number-mean
+        mean += delta/count
+        m2 += delta*(number-mean)
+    return mean, m2/(count-1) if count>1 else 0.
+---
+大偏移小方差 | (iter([1e12+1,1e12+2,1e12+3]),) => (1e12+2,1.)
+单值 | (iter([-5.]),) => (-5.,0.)
+空 | (iter(()),) => (0.,0.)
+
+@@ reservoir | Reservoir Sampling (Algorithm R) | 进阶 | 数据与流式系统 | P
+reservoir(stream, capacity, draw)
+通过 Algorithm R 从单次迭代器均匀保留至多 capacity 项。
+前 capacity 项直接填入。对第 i 个 0-based 后续项调用 draw(i+1)，返回 [0,i] 的索引，若小于 capacity 则替换该槽。容量为零返回空列表。
+? 区分实际读取的总元素数和 reservoir 当前长度。
+---
+    if capacity == 0:
+        return []
+    sample = []
+    for index, item in enumerate(stream):
+        if index < capacity:
+            sample.append(item)
+        else:
+            slot = draw(index+1)
+            if slot < capacity:
+                sample[slot] = item
+    return sample
+---
+固定抽签 | (iter("abcde"),2,lambda n:{3:1,4:3,5:0}[n]) => ["e","c"]
+短序列 | (iter([2,9]),5,lambda n: -1) => [2,9]
+零容量 | (iter([1,2]),0,lambda n: n-1) => []
+
+@@ merge-token-pair | One BPE Merge Pass | 入门 | 数据与流式系统 | P
+merge_pair(tokens, pair, merged_id)
+执行 BPE 的单轮合并。
+从左向右匹配指定相邻 pair。成功合并时消费两个 token，这一轮不重新处理合并后产生的 token。返回新列表。
+? 使用索引指针，匹配时前进两步，普通位置前进一步。
+---
+    output = []
+    i = 0
+    while i < len(tokens):
+        if i+1 < len(tokens) and (tokens[i],tokens[i+1]) == tuple(pair):
+            output.append(merged_id)
+            i += 2
+        else:
+            output.append(tokens[i])
+            i += 1
+    return output
+---
+重叠只取左侧 | ([1,1,1,1,2],(1,1),7) => [7,7,2]
+合并后不反复触发 | ([1,2,2],(1,2),1) => [1,2]
+空列表 | ([],(4,5),9) => []
+
+@@ unigram-perplexity | Smoothed Unigram NLL | 入门 | 数据与流式系统 | P
+unigram_nll(counts, sequence, alpha, vocabulary_size)
+用加 alpha 平滑后的 unigram 模型计算指定序列平均负对数似然。
+counts 为 token 到语料计数的字典，vocabulary_size 包括未出现在 counts 的 token。使用自然对数，空序列返回 0。
+? 每个 token 概率的分母一致，未知 token 的原始计数为零。
+---
+    from math import log
+    if not sequence:
+        return 0.
+    denominator = sum(counts.values()) + alpha*vocabulary_size
+    return sum(log(denominator) - log(counts.get(token,0)+alpha) for token in sequence) / len(sequence)
+---
+词与未知词 | ({"a":3},["a","b"],1.,2) => 0.916290731874155
+空序列 | ({"a":3},[],1.,2) => 0.
+均匀词表 | ({},[0,1,1],.5,4) => 1.3862943611198906
+
+@@ hysteresis-stream | Streaming Hysteresis Gate | 进阶 | 数据与流式系统 | P
+hysteresis(scores, low, high)
+让在线检测信号在两个阈值之间保持上一状态，以减少频繁切换。
+初始关闭。分数 ≥high 时打开，≤low 时关闭，两阈值间保留状态。low<high。返回每个输入产生的布尔状态列表。
+? 记录一个布尔状态并逐项更新。不要用后续帧回填历史输出。
+---
+    active = False
+    output = []
+    for score in scores:
+        if score >= high:
+            active = True
+        elif score <= low:
+            active = False
+        output.append(active)
+    return output
+---
+边界与中间态 | (iter([.5,.8,.7,.3,.5,.9]),.3,.8) => [False,True,True,False,False,True]
+始终在间隔内 | (iter([.5,.5]),.2,.8) => [False,False]
+空流 | (iter(()),0.,1.) => []
+
+@@ discounted-returns | Discounted Returns with Episode Boundaries | 入门 | 强化学习与对齐 | N
+discounted_returns(rewards, done, gamma, bootstrap=0.)
+在一段可能包含多个 episode 的 rollout 中计算 reward-to-go。
+rewards、done 同为 [T]，done[t] 表示执行第 t 步后终止。最后一步未结束可用 bootstrap 值。返回长度 T 的浮点数组。
+? 逆向扫描，done 时切断后来回报的传播。
+---
+    out = np.empty(rewards.shape,dtype=float)
+    value = bootstrap
+    for step in range(len(rewards)-1,-1,-1):
+        value = rewards[step] + (0. if done[step] else gamma*value)
+        out[step] = value
+    return out
+---
+两个 episode | (a([1.,2.,4.]),a([False,True,False]),.5,10.) => a([2.,2.,9.])
+尾部已终止 | (a([2.]),a([True]),.9,100.) => a([2.])
+空 rollout | (a([]),a([],dtype=bool),.9) => a([])
+
+@@ gae | Generalized Advantage Estimation | 进阶 | 强化学习与对齐 | N
+gae(rewards, values, done, gamma, lam)
+用广义优势估计计算 rollout 中逐步 advantage。
+values 为长度 T+1，values[t] 估计当前状态，最后一个值用于 bootstrap。done 后清除下一状态估计及后续 advantage。
+? 先求 TD residual，再逆向做 gamma·lam 加权递推。
+---
+    out = np.empty(rewards.shape,dtype=float)
+    acc = 0.
+    for t in range(len(rewards)-1,-1,-1):
+        alive = 0. if done[t] else 1.
+        delta = rewards[t] + gamma*alive*values[t+1] - values[t]
+        acc = delta + gamma*lam*alive*acc
+        out[t] = acc
+    return out
+---
+中间 episode 终止 | (a([1.,2.,3.]),a([0.,0.,0.,10.]),a([False,True,False]),.5,.8) => a([1.8,2.,8.])
+只有 TD residual | (a([2.,1.]),a([1.,4.,6.]),a([False,True]),.5,0.) => a([3.,-3.])
+全终止 | (a([2.,1.]),a([7.,4.,6.]),a([True,True]),.5,1.) => a([-5.,-3.])
+
+@@ q-learning | Tabular Q-Learning Update | 入门 | 强化学习与对齐 | N
+q_update(q, state, action, reward, next_state, done, lr, gamma)
+应用一次 off-policy Q-learning 的 Bellman 更新。
+q 为 [状态数,动作数]，只更新指定项并返回新表。终止时目标为 reward，否则加 gamma·max Q(next_state)。
+? 目标在旧 Q 上计算，然后向目标移动 lr 倍 TD error。
+---
+    target = reward if done else reward + gamma*q[next_state].max()
+    result = q.copy()
+    result[state,action] += lr*(target-q[state,action])
+    return result
+---
+未终止 bootstrap | (a([[1.,0.],[2.,4.]]),0,0,2.,1,False,.5,.5) => a([[2.5,0.],[2.,4.]])
+终止忽略未来 | (a([[1.,0.],[2.,4.]]),1,1,0.,0,True,1.,.9) => a([[1.,0.],[2.,0.]])
+同一状态读旧值 | (a([[1.,4.]]),0,1,1.,0,False,1.,.5) => a([[1.,3.]])
+
+@@ grpo-group-normalize | GRPO Group-Relative Advantages | 进阶 | 强化学习与对齐 | N
+group_advantages(rewards, group_ids, eps=1e-8)
+在各 prompt 的采样组内做奖励中心化和标准化。
+rewards 和 group_ids 形状 [N]。使用总体标准差，分母为 std+eps，保留原索引顺序。常数组返回全零。
+? 组可能交错或不连续。只用同组样本估计均值和方差。
+---
+    out = np.zeros(rewards.shape,dtype=float)
+    for group in np.unique(group_ids):
+        mask = group_ids==group
+        selected = rewards[mask]
+        out[mask] = (selected-selected.mean())/(selected.std()+eps)
+    return out
+---
+交错分组 | (a([1.,10.,3.,14.]),a([4,9,4,9])) => a([-1.,-1.,1.,1.])
+单样本与常数 | (a([3.,8.,8.]),a([5,0,0])) => a([0.,0.,0.])
+显式 epsilon | (a([0.,2.]),a([1,1]),1.) => a([-.5,.5])
+
+@@ ppo-clipped-loss | PPO Clipped Policy Loss | 进阶 | 强化学习与对齐 | N
+ppo_loss(new_logp, old_logp, advantage, eps)
+提交 policy 端 PPO clipped surrogate 的负均值。
+ratio=exp(new_logp-old_logp)。每项取 min(ratio·adv, clip(ratio,1-eps,1+eps)·adv)，返回取负后的均值。
+? 对负 advantage，较低 ratio 可能触发 clipping。直接在乘积后取 min。
+---
+    ratio = np.exp(new_logp-old_logp)
+    clipped = np.clip(ratio,1.-eps,1.+eps)
+    return float(-np.minimum(ratio*advantage,clipped*advantage).mean())
+---
+两种符号不同方向 | (np.log(a([2.,.5])),np.zeros(2),a([1.,-1.]),.2) => -.2
+小幅变化 | (np.log(a([1.1])),a([0.]),a([2.]),.2) => -2.2
+负优势惩罚高 ratio | (np.log(a([2.])),a([0.]),a([-1.]),.2) => 2.
+
+@@ dpo-loss | Direct Preference Optimization Loss | 进阶 | 强化学习与对齐 | N
+dpo_loss(policy_chosen, policy_rejected, ref_chosen, ref_rejected, beta)
+根据各回答的序列 log-prob 计算稳定的 DPO 偏好损失。
+各 log-prob 数组同形状。logit=beta·[(policy_chosen-policy_rejected)-(ref_chosen-ref_rejected)]，返回 mean(-log(sigmoid(logit)))。
+? logaddexp(0,-logit) 能避免对大数取指数。
+---
+    margin = beta*((policy_chosen-policy_rejected)-(ref_chosen-ref_rejected))
+    return float(np.logaddexp(0.,-margin).mean())
+---
+policy 与 reference 相等 | (a([-2.,-4.]),a([-5.,-5.]),a([-2.,-4.]),a([-5.,-5.]),.1) => np.log(2.)
+极端反偏好 | (a([-2000.]),a([0.]),a([0.]),a([0.]),.5) => 1000.
+偏好超出 reference | (a([-1.]),a([-3.]),a([-2.]),a([-3.]),1.) => np.log1p(np.exp(-1.))
+
+@@ int8-quantization | Symmetric Per-Channel INT8 Quantization | 进阶 | 推理与部署 | N
+quantize_int8(weights)
+对每个输出通道分别执行对称 int8 权重量化。
+weights 为 [C,D]，每行 scale=max(abs(row))/127，纯零行 scale=1。用 nearest-even 舍入并限制在 [-127,127]。返回 (int8_values,scales)，scales 为 [C]。
+? 先计算每行 scale，再给 scale 增加轴后广播除法。
+---
+    peaks = np.max(np.abs(weights),axis=1)
+    scales = np.where(peaks==0,1.,peaks/127.)
+    quantized = np.clip(np.rint(weights/scales[:,None]),-127,127).astype(np.int8)
+    return quantized, scales
+---
+含纯零通道 | (a([[127.,-63.5,2.5],[0.,0.,0.]]),) => (a([[127,-64,2],[0,0,0]],dtype=np.int8),a([1.,1.]))
+独立 scale | (a([[1.],[-.5]]),) => (a([[127],[-127]],dtype=np.int8),a([1/127,.5/127]))
+浮点比例 | (a([[1.,.501,-.501],[-16.,0.,8.001]]),)
+
+@@ lora-merge | Merge a LoRA Adapter | 进阶 | 推理与部署 | N
+merge_lora(weight, a_down, b_up, alpha)
+将 LoRA 的低秩更新融合进线性层权重。
+weight 为 [out,in]，a_down 为 [rank,in]，b_up 为 [out,rank]，rank 正整数。更新是 alpha/rank·(b_up @ a_down)。
+? 先确认矩阵乘法顺序，避免对基础权重就地修改。
+---
+    return weight + (alpha/a_down.shape[0])*(b_up @ a_down)
+---
+rank 一 | (np.eye(2),a([[1.,2.]]),a([[3.],[4.]]),.5) => a([[2.5,3.],[2.,5.]])
+rank 二的缩放 | (a([[1.,0.]]),np.eye(2),a([[2.,4.]]),1.) => a([[2.,2.]])
+零 alpha | (np.zeros((1,3)),np.ones((2,3)),np.ones((1,2)),0.) => np.zeros((1,3))
+
+@@ kv-cache-bytes | Estimate KV Cache Memory | 入门 | 推理与部署 | P
+kv_cache_bytes(batch, layers, kv_heads, head_dim, tokens, bytes_per_scalar)
+估算 decoder 所有层的密集 KV cache 占用字节数。
+每层保存 K 和 V，不计额外元数据、对齐和分配器开销。返回整数。使用 KV heads，支持 GQA/MQA。
+? 先算单样本单层单 token 的缓存，再乘剩余维度。
+---
+    return 2*batch*layers*kv_heads*head_dim*tokens*bytes_per_scalar
+---
+GQA fp16 | (1,32,8,128,1024,2) => 134217728
+还没有 token | (8,30,1,64,0,2) => 0
+多个请求 | (3,2,1,4,10,1) => 480
